@@ -43,5 +43,4 @@ debug_full_extracted_text.txt
 # Extra unused requirements file
 requirements-extra.txt
 
-# Company confidential logo — keep private
-app/assets/Simdaa_Logo.png
+
