@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtual envs
+kk/
+venv/
+.env
+
+# OS & editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/
+
+# Database + outputs (auto-generated)
+database/claims.db
+reports/*.pdf
+
+# Raw uploads (optional; keep ignored by default)
+data/raw_claims/*
+
+# Models (generated)
+models/*
+
+# Misc
+*.sqlite
