@@ -123,8 +123,7 @@ database/claims.db
 ai-medical-claim-processing-system-python-ml/
 │
 ├── app/
-│   ├── streamlit_app.py
-│   └── assets/                 # company logo / UI images
+│   └── streamlit_app.py                  
 │
 ├── data/
 │   └── raw_claims/             # user-uploaded claim PDFs
@@ -198,7 +197,6 @@ ai-medical-claim-processing-system-python-ml/
 
 # <a id="ui-overview"></a> **User Interface (UI Overview)**
 
-*(Thumbnails below — click to view full images)*
 
 ### **1. Upload & Process Medical Claims**
 
