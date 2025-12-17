@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# checking the health of the system , from outside , if we run the system we can see the health ,
+# but if we want to see without running the system , we can by running this script
 """
 scripts/check_pipeline_health.py
 

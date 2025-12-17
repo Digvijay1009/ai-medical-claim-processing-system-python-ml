@@ -1,3 +1,4 @@
+# For checking data in database
 import sqlite3
 import os
 

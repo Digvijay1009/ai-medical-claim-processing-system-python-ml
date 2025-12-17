@@ -9,6 +9,8 @@ import glob
 import base64
 import numpy as np
 from io import BytesIO
+import warnings
+warnings.filterwarnings('ignore')
 
 # ====================================================================
 #  Setup and Imports
@@ -31,6 +33,7 @@ from scripts.main_processing_pipeline import DomainSpecificClaimProcessingPipeli
 from scripts.db_handler import DatabaseHandler
 from scripts.text_extractor import TextExtractor
 from scripts.file_handler import FileHandler
+from scripts.fraud_actions import handle_mark_as_fraud
 from scripts.report_generator import MedicalClaimReportGenerator
 
 
@@ -491,12 +494,18 @@ class EnhancedStreamlitApp:
             st.write(f"**Diagnosis:** {medical_info.get('diagnosis', 'Unknown')}")
             st.write(f"**Service Date:** {medical_info.get('admission_date', 'Unknown')}")
 
-
     def _display_fraud_claim_details(self, claim, comp_report_sections):
         """
-        Display detailed fraud claim information
+        Display detailed fraud claim information using DATABASE data (Instant) 
+        instead of waiting for LLM Report.
         """
-        comp_report_sections = comp_report_sections.get('sections', {}) 
+        # We prefer DB data because it loads instantly
+        medical_errors = claim.get('medical_errors', []) or []
+        coverage_issues = claim.get('policy_limits_exceeded', []) or []
+        exclusions = claim.get('policy_exclusions', []) or []
+        
+        # 'fraud_indicators' is the DB column, 'fraud_patterns_detected' is the LLM key
+        fraud_patterns = claim.get('fraud_indicators', []) or [] 
 
         col1, col2, col3 = st.columns(3)
         
@@ -510,77 +519,301 @@ class EnhancedStreamlitApp:
                 st.error(f"Medical Score: {medical_score:.1%}")
         
         with col2:
-            st.metric("Validation Score", f"{(claim.get('validation_score') or 0):.1%}")
-            st.metric("Amount", f"₹{(claim.get('total_claim_amount') or 0):,}")
-            st.write(f"**Type:** {claim.get('claim_type', 'Unknown')}")
-            
-            # Coverage Issues
-            if comp_report_sections:
-                coverage = comp_report_sections.get('insurance_coverage', {})
-                if coverage.get('policy_validation', {}).get('status') == 'EXPIRED':
-                    st.error("Policy Expired")
-        
+            # We create unique keys for buttons
+            btn_key = f"fraud_{claim['claim_id']}"
+            processed_key = f"processed_fraud_{claim['claim_id']}"
+
+            # --- MARK AS FRAUD BUTTON (CONNECTED TO YOUR NEW BACKEND) ---
+            if st.button(f"🚨 Mark as Fraud", key=btn_key):
+                # Prepare data for the rejection letter
+                fraud_data = {
+                    'detected_patterns': [{'description': p} for p in fraud_patterns] if fraud_patterns else [{'description': 'High Fraud Score'}],
+                    'diagnosis': claim.get('diagnosis'),
+                    'overall_risk_score': claim.get('overall_risk_score')
+                }
+                
+                with st.spinner("Processing Rejection & Generating Letter..."):
+                    success, pdf_path = handle_mark_as_fraud(claim['claim_id'], "Admin_User", fraud_data)
+
+                if success:
+                    st.success("Claim Rejected. AI Model Updated.")
+                    st.session_state[processed_key] = pdf_path
+                    st.rerun() # Refresh to show status change
+
+            # Show Download Button if processed
+            if processed_key in st.session_state:
+                pdf_path = st.session_state[processed_key]
+                if os.path.exists(pdf_path):
+                    with open(pdf_path, "rb") as pdf_file:
+                        st.download_button("📥 Download Rejection Letter", pdf_file, file_name=os.path.basename(pdf_path), mime="application/pdf", key=f"dl_{claim['claim_id']}")
+
         with col3:
             risk_score = claim.get('overall_risk_score') or 0
             st.metric("AI Recommendation", 
                             "🚨 REJECT" if risk_score > 0.7 else "⚠️ INVESTIGATE",
                             delta=f"Risk: {risk_score:.1%}",
                             delta_color="inverse")
-        
-        # Show specific domain-specific issues
-        if comp_report_sections:
-            medical_validation = comp_report_sections.get('medical_validation', {}).get('medical_issues', {})
-            medical_errors = medical_validation.get('critical_errors', [])
             
-            coverage = comp_report_sections.get('insurance_coverage', {}).get('coverage_violations', {})
-            coverage_issues = coverage.get('limit_exceeded', [])
-            exclusions = coverage.get('excluded_procedures', [])
-            
-            fraud_analysis = comp_report_sections.get('fraud_analysis', {})
-            fraud_patterns = fraud_analysis.get('fraud_patterns_detected', [])
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                if medical_errors:
-                    st.error("**Medical Issues:**")
-                    for error in medical_errors[:2]:
-                        st.write(f"• {error}")
-            
-            with col2:
-                if coverage_issues or exclusions:
-                    st.error("**Coverage Issues:**")
-                    for issue in coverage_issues[:2]:
-                        st.write(f"• {issue}")
-                    for exclusion in exclusions[:2]:
-                        st.write(f"• {exclusion}")
-            
-            with col3:
-                if fraud_patterns:
-                    st.error("**Fraud Patterns:**")
-                    for pattern in fraud_patterns[:2]:
-                        if isinstance(pattern, dict):
-                            st.write(f"• {pattern.get('description', 'Unknown')}")
-                        else:
-                            st.write(f"• {pattern}")
-        
-        # Quick actions
-        col1, col2, col3 = st.columns(3)
-        with col1:
             if st.button(f"📋 Comprehensive Analysis", key=f"detail_{claim['claim_id']}"):
                 st.session_state.selected_claim = claim['claim_id']
+                # This triggers the LLM only when requested
                 st.rerun() 
-        with col2:
-            if st.button(f"🚨 Mark as Fraud", key=f"fraud_{claim['claim_id']}"):
-                self.db_handler.update_claim_status(claim['claim_id'], "Fraud Suspected", "AI System", "Domain-specific fraud detection")
-                st.success("Claim marked as fraud suspected!")
-                st.rerun()
-        with col3:
-            if st.button(f"✅ Approve Anyway", key=f"approve_{claim['claim_id']}"):
-                self.db_handler.update_claim_status(claim['claim_id'], "Approved", "Manager Override", "Manual approval despite domain-specific risk flags")
-                st.success("Claim approved with override!")
-                st.rerun()
 
+        # --- Display Issues (Now reading from DB, so it's instant) ---
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if medical_errors:
+                st.error("**Medical Issues:**")
+                for error in medical_errors[:3]:
+                    st.write(f"• {error}")
+        
+        with col2:
+            if coverage_issues or exclusions:
+                st.error("**Coverage Issues:**")
+                for issue in coverage_issues[:2]:
+                    st.write(f"• {issue}")
+                for exclusion in exclusions[:2]:
+                    st.write(f"• {exclusion}")
+        
+        with col3:
+            if fraud_patterns:
+                st.error("**Fraud Patterns:**")
+                for pattern in fraud_patterns[:3]:
+                    st.write(f"• {pattern}")
+    # def _display_fraud_claim_details(self, claim, comp_report_sections):
+    #     """
+    #     Display detailed fraud claim information
+    #     """
+    #     comp_report_sections = comp_report_sections.get('sections', {}) 
+
+    #     col1, col2, col3 = st.columns(3)
+        
+    #     with col1:
+    #         st.metric("Fraud Probability", f"{(claim.get('fraud_score') or 0):.1%}")
+    #         st.write(f"**Patient:** {claim['patient_name']}")
+    #         st.write(f"**Diagnosis:** {claim.get('diagnosis', 'Unknown')}")
+            
+    #         medical_score = claim.get('medical_appropriateness_score') or 1.0
+    #         if medical_score < 0.7:
+    #             st.error(f"Medical Score: {medical_score:.1%}")
+        
+    #     with col2:
+    #         st.metric("Validation Score", f"{(claim.get('validation_score') or 0):.1%}")
+    #         st.metric("Amount", f"₹{(claim.get('total_claim_amount') or 0):,}")
+    #         st.write(f"**Type:** {claim.get('claim_type', 'Unknown')}")
+            
+    #         # Coverage Issues
+    #         if comp_report_sections:
+    #             coverage = comp_report_sections.get('insurance_coverage', {})
+    #             if coverage.get('policy_validation', {}).get('status') == 'EXPIRED':
+    #                 st.error("Policy Expired")
+        
+    #     with col3:
+    #         risk_score = claim.get('overall_risk_score') or 0
+    #         st.metric("AI Recommendation", 
+    #                         "🚨 REJECT" if risk_score > 0.7 else "⚠️ INVESTIGATE",
+    #                         delta=f"Risk: {risk_score:.1%}",
+    #                         delta_color="inverse")
+        
+    #     # Show specific domain-specific issues
+    #     if comp_report_sections:
+    #         medical_validation = comp_report_sections.get('medical_validation', {}).get('medical_issues', {})
+    #         medical_errors = medical_validation.get('critical_errors', [])
+            
+    #         coverage = comp_report_sections.get('insurance_coverage', {}).get('coverage_violations', {})
+    #         coverage_issues = coverage.get('limit_exceeded', [])
+    #         exclusions = coverage.get('excluded_procedures', [])
+            
+    #         fraud_analysis = comp_report_sections.get('fraud_analysis', {})
+    #         fraud_patterns = fraud_analysis.get('fraud_patterns_detected', [])
+            
+    #         col1, col2, col3 = st.columns(3)
+            
+    #         with col1:
+    #             if medical_errors:
+    #                 st.error("**Medical Issues:**")
+    #                 for error in medical_errors[:2]:
+    #                     st.write(f"• {error}")
+            
+    #         with col2:
+    #             if coverage_issues or exclusions:
+    #                 st.error("**Coverage Issues:**")
+    #                 for issue in coverage_issues[:2]:
+    #                     st.write(f"• {issue}")
+    #                 for exclusion in exclusions[:2]:
+    #                     st.write(f"• {exclusion}")
+            
+    #         with col3:
+    #             if fraud_patterns:
+    #                 st.error("**Fraud Patterns:**")
+    #                 for pattern in fraud_patterns[:2]:
+    #                     if isinstance(pattern, dict):
+    #                         st.write(f"• {pattern.get('description', 'Unknown')}")
+    #                     else:
+    #                         st.write(f"• {pattern}")
+        
+    #     # Quick actions
+    #     col1, col2, col3 = st.columns(3)
+    #     with col1:
+    #         if st.button(f"📋 Comprehensive Analysis", key=f"detail_{claim['claim_id']}"):
+    #             st.session_state.selected_claim = claim['claim_id']
+    #             st.rerun() 
+    #     with col2:
+    #         # Create unique keys for this claim's buttons
+    #         btn_key = f"fraud_{claim['claim_id']}"
+            
+    #         # Check if this claim was already processed in this session to keep the download button visible
+    #         processed_key = f"processed_fraud_{claim['claim_id']}"
+            
+    #         if st.button(f"🚨 Mark as Fraud", key=btn_key):
+    #             # A. Prepare Data for Backend
+    #             # We get the fraud analysis section from the report
+    #             fraud_data = comp_report_sections.get('fraud_analysis', {})
+                
+    #             # FIX: Map 'fraud_patterns_detected' to 'detected_patterns' 
+    #             # (Your UI uses one name, but the backend script expects the other)
+    #             if 'detected_patterns' not in fraud_data:
+    #                 fraud_data['detected_patterns'] = fraud_data.get('fraud_patterns_detected', [])
+
+    #             # B. Call the Backend Function with a Spinner
+    #             with st.spinner("Processing Rejection & Generating Letter..."):
+    #                 success, pdf_path = handle_mark_as_fraud(
+    #                     claim['claim_id'], 
+    #                     "Admin_User", 
+    #                     fraud_data
+    #                 )
+
+    #             # C. Handle Success
+    #             if success:
+    #                 st.success("Claim Rejected. AI Model Updated.")
+    #                 # Save path to session state so download button persists
+    #                 st.session_state[processed_key] = pdf_path
+    #             else:
+    #                 st.error("Failed to process request.")
+
+    #         # D. Show Download Button (if processed)
+    #         if processed_key in st.session_state:
+    #             pdf_path = st.session_state[processed_key]
+    #             if os.path.exists(pdf_path):
+    #                 with open(pdf_path, "rb") as pdf_file:
+    #                     st.download_button(
+    #                         label="📥 Download Rejection Letter",
+    #                         data=pdf_file,
+    #                         file_name=os.path.basename(pdf_path),
+    #                         mime="application/pdf",
+    #                         key=f"dl_{claim['claim_id']}"
+    #                     )
+    #     with col3:
+    #         if st.button(f"✅ Approve Anyway", key=f"approve_{claim['claim_id']}"):
+    #             self.db_handler.update_claim_status(claim['claim_id'], "Approved", "Manager Override", "Manual approval despite domain-specific risk flags")
+    #             st.success("Claim approved with override!")
+    #             st.rerun()
+    # ------------------------------------------------------------------
+    #  NEW: Analytics Dashboard Helper
+    # ------------------------------------------------------------------
+    def _display_analytics_dashboard(self):
+        """Display domain-specific analytics dashboard with AI Monitor"""
+        st.title("📈 Domain-Specific Analytics Dashboard")
+        
+        claims = self.db_handler.get_all_claims()
+        if not claims:
+            st.info("No data available for analytics")
+            return
+        
+        # --- PART 1: EXISTING ANALYTICS ---
+        df_data = []
+        for claim in claims:
+            df_data.append({
+                'Claim ID': claim['claim_id'],
+                'Patient': claim['patient_name'],
+                'Diagnosis': claim.get('diagnosis', 'Unknown'),
+                'Amount': claim.get('total_claim_amount', 0),
+                'Fraud Score': claim.get('fraud_score', 0),
+                'Medical Score': claim.get('medical_appropriateness_score', 0),
+                'Status': claim.get('status', 'Unknown')
+            })
+        
+        df = pd.DataFrame(df_data)
+        
+        # Metrics Row
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Claims", len(df))
+        with col2:
+            st.metric("Total Claim Value", f"₹{df['Amount'].sum():,.0f}")
+        with col3:
+            st.metric("Avg Fraud Risk", f"{df['Fraud Score'].mean():.1%}")
+        with col4:
+            st.metric("Avg Medical Score", f"{df['Medical Score'].mean():.1%}")
+        
+        # Charts Row
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Fraud Risk Distribution")
+            fig = px.histogram(df, x='Fraud Score', nbins=20, title="Distribution of Fraud Risk Scores")
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.subheader("Medical vs Fraud Risk")
+            fig = px.scatter(df, x='Medical Score', y='Fraud Score', color='Status', size='Amount', title="Medical Appropriateness vs Fraud Risk")
+            st.plotly_chart(fig, use_container_width=True)
+        
+        st.subheader("📋 Top Diagnoses by Claim Count")
+        diagnosis_counts = df['Diagnosis'].value_counts().head(10)
+        fig = px.bar(x=diagnosis_counts.values, y=diagnosis_counts.index, orientation='h', title="Most Common Diagnoses")
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- PART 2: NEW AI LEARNING MONITOR ---
+        st.markdown("---")
+        st.subheader("🧠 AI Continuous Learning Monitor")
+        
+        training_file = os.path.join(ROOT_DIR, "data", "verified_fraud_cases.csv")
+        
+        if os.path.exists(training_file):
+            try:
+                df_train = pd.read_csv(training_file)
+                
+                if not df_train.empty:
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("🛡️ Verified Fraud Cases", len(df_train))
+                    with col2:
+                        st.metric("⚠️ Avg Fraud Risk Score", f"{df_train['risk_score'].mean():.1%}")
+                    with col3:
+                        last_update = df_train['timestamp'].max()
+                        st.metric("🕒 Last AI Update", str(last_update)[:16])
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write("**Top Diagnoses Flagged as Fraud**")
+                        st.bar_chart(df_train['diagnosis'].value_counts().head(5))
+                    
+                    with col2:
+                        st.write("**Most Common Fraud Patterns**")
+                        all_patterns = []
+                        for pat_str in df_train['fraud_patterns']:
+                            try:
+                                # Clean string "['a', 'b']" -> list ['a', 'b']
+                                clean_str = pat_str.replace("[", "").replace("]", "").replace("'", "").replace('"', "")
+                                items = [x.strip() for x in clean_str.split(",")]
+                                valid_items = [x for x in items if x and x != ""]
+                                all_patterns.extend(valid_items)
+                            except:
+                                pass
+                        
+                        if all_patterns:
+                            from collections import Counter
+                            pat_counts = Counter(all_patterns).most_common(5)
+                            st.table(pd.DataFrame(pat_counts, columns=["Fraud Pattern", "Count"]))
+                        else:
+                            st.info("No patterns extracted yet.")
+                else:
+                    st.info("Training file exists but is empty.")
+            except Exception as e:
+                st.error(f"Error reading training data: {e}")
+        else:
+            st.info("ℹ️ No verified fraud cases yet. Go to 'Fraud Detection' and mark a claim as fraud to initialize the AI training set.")
     # ------------------------------------------------------------------
     # Main Application Runner
     # ------------------------------------------------------------------
@@ -840,57 +1073,124 @@ class EnhancedStreamlitApp:
                                 st.error(f"Error: {comp_report['error']}")
 
         # ==================== FRAUD DETECTION ====================
+        # In app/streamlit_app.py
+
+        # ==================== FRAUD DETECTION ====================
         elif nav_option == "🚨 Fraud Detection":
             st.title("🚨 Domain-Specific Fraud Detection")
-            st.markdown("Claims with high fraud risk and suspicious medical patterns")
             
-            claims = self.db_handler.get_all_claims()
-            
-            high_risk_claims = []
-            for claim in claims:
-                comp_report = {} 
+            # --- 1. CHECK IF USER CLICKED "COMPREHENSIVE ANALYSIS" ---
+            if st.session_state.get('selected_claim'):
+                claim_id = st.session_state.selected_claim
                 
-                fraud_score = claim.get('fraud_score') or 0
-                medical_score = claim.get('medical_appropriateness_score') or 1.0
-                overall_risk = claim.get('overall_risk_score') or 0
+                # A. "Back" Button to return to the list
+                if st.button("← Back to Fraud Dashboard"):
+                    del st.session_state.selected_claim
+                    st.rerun()
                 
-                has_medical_issues = medical_score < 0.7
-                has_fraud_patterns = fraud_score > 0.6
+                st.markdown(f"### 🤖 AI Deep Dive: {claim_id}")
                 
-                has_coverage_violations = (
-                    claim.get('policy_status') == 'EXPIRED' or
-                    bool(claim.get('policy_limits_exceeded')) or 
-                    bool(claim.get('policy_exclusions'))        
-                )
-                
-                if (fraud_score > 0.6 or overall_risk > 0.6 or
-                    has_medical_issues or has_coverage_violations or has_fraud_patterns):
-                    
+                # B. THE ONLY PLACE LLM IS CALLED
+                # This spinner will show only when they click the button
+                with st.spinner("Consulting Medical Knowledge Base & Validating Policy..."):
                     try:
-                        # --- ⚠️ USE CACHED REPORT ---
-                        comp_report = self._get_cached_report(claim['claim_id'])
-                    except Exception as e:
-                        st.warning(f"Could not generate report for {claim['claim_id']}: {e}")
-                        comp_report = {} 
+                        # This calls your _get_cached_report (LLM)
+                        comp_report = self._get_cached_report(claim_id)
                         
-                    high_risk_claims.append((claim, comp_report))
+                        # C. Display the Full Report (Tabs)
+                        if comp_report and 'error' not in comp_report:
+                            self._display_comprehensive_results(comp_report)
+                        else:
+                            st.error(f"Analysis failed: {comp_report.get('error')}")
+                            
+                    except Exception as e:
+                        st.error(f"System Error: {e}")
             
-            if not high_risk_claims:
-                st.success("🎉 No high-risk claims detected!")
+            # --- 2. SHOW THE FAST DASHBOARD (DEFAULT VIEW) ---
             else:
-                st.error(f"🚨 {len(high_risk_claims)} HIGH-RISK CLAIMS REQUIRE IMMEDIATE ATTENTION")
+                st.markdown("Claims with high fraud risk and suspicious medical patterns")
                 
-                for claim, comp_report in sorted(high_risk_claims, 
-                                                key=lambda x: x[0].get('overall_risk_score') or 0, 
-                                                reverse=True):
-                    risk_score = claim.get('overall_risk_score') or 0
-                    diagnosis = claim.get('diagnosis', 'Unknown')
+                # Fetch basic data from DB (Instant)
+                claims = self.db_handler.get_all_claims()
+                
+                high_risk_claims = []
+                for claim in claims:
+                    # Fast filtering using DB columns (No LLM)
+                    fraud_score = claim.get('fraud_score') or 0
+                    overall_risk = claim.get('overall_risk_score') or 0
+                    medical_score = claim.get('medical_appropriateness_score') or 1.0
                     
-                    with st.expander(
-                        f"🚨 {claim['claim_id']} - Risk: {risk_score:.1%} - {diagnosis}", 
-                        expanded=False
-                    ):
-                        self._display_fraud_claim_details(claim, comp_report)
+                    if (fraud_score > 0.6 or overall_risk > 0.6 or medical_score < 0.7):
+                        high_risk_claims.append(claim)
+                
+                if not high_risk_claims:
+                    st.success("🎉 No high-risk claims detected!")
+                else:
+                    st.error(f"🚨 {len(high_risk_claims)} HIGH-RISK CLAIMS REQUIRE IMMEDIATE ATTENTION")
+                    
+                    # Sort by risk
+                    for claim in sorted(high_risk_claims, key=lambda x: x.get('overall_risk_score') or 0, reverse=True):
+                        
+                        # Display Summary Card
+                        risk_score = claim.get('overall_risk_score') or 0
+                        diagnosis = claim.get('diagnosis', 'Unknown')
+                        
+                        with st.expander(f"🚨 {claim['claim_id']} - Risk: {risk_score:.1%} - {diagnosis}", expanded=False):
+                            # This calls the FAST display function we just optimized
+                            # We pass {} as the report because we don't need the LLM yet
+                            self._display_fraud_claim_details(claim, {})
+        # elif nav_option == "🚨 Fraud Detection": updated on 17-12-2025 (For comprehensive anaylsis calling LLM)
+        #     st.title("🚨 Domain-Specific Fraud Detection")
+        #     st.markdown("Claims with high fraud risk and suspicious medical patterns")
+            
+        #     claims = self.db_handler.get_all_claims()
+            
+        #     high_risk_claims = []
+        #     for claim in claims:
+        #         comp_report = {} 
+                
+        #         fraud_score = claim.get('fraud_score') or 0
+        #         medical_score = claim.get('medical_appropriateness_score') or 1.0
+        #         overall_risk = claim.get('overall_risk_score') or 0
+                
+        #         has_medical_issues = medical_score < 0.7
+        #         has_fraud_patterns = fraud_score > 0.6
+                
+        #         has_coverage_violations = (
+        #             claim.get('policy_status') == 'EXPIRED' or
+        #             bool(claim.get('policy_limits_exceeded')) or 
+        #             bool(claim.get('policy_exclusions'))        
+        #         )
+                
+        #         if (fraud_score > 0.6 or overall_risk > 0.6 or
+        #             has_medical_issues or has_coverage_violations or has_fraud_patterns):
+                    
+        #             try:
+        #                 # --- ⚠️ USE CACHED REPORT --- updated on 17-12-2025(to stop LLM calls)
+        #                 # comp_report = self._get_cached_report(claim['claim_id'])
+        #                 comp_report = {}
+        #             except Exception as e:
+        #                 # st.warning(f"Could not generate report for {claim['claim_id']}: {e}")
+        #                 comp_report = {} 
+                        
+        #             high_risk_claims.append((claim, comp_report))
+            
+        #     if not high_risk_claims:
+        #         st.success("🎉 No high-risk claims detected!")
+        #     else:
+        #         st.error(f"🚨 {len(high_risk_claims)} HIGH-RISK CLAIMS REQUIRE IMMEDIATE ATTENTION")
+                
+        #         for claim, comp_report in sorted(high_risk_claims, 
+        #                                         key=lambda x: x[0].get('overall_risk_score') or 0, 
+        #                                         reverse=True):
+        #             risk_score = claim.get('overall_risk_score') or 0
+        #             diagnosis = claim.get('diagnosis', 'Unknown')
+                    
+        #             with st.expander(
+        #                 f"🚨 {claim['claim_id']} - Risk: {risk_score:.1%} - {diagnosis}", 
+        #                 expanded=False
+        #             ):
+        #                 self._display_fraud_claim_details(claim, comp_report)
 
         
         # ==================== HUMAN REVIEW ====================
@@ -986,61 +1286,64 @@ class EnhancedStreamlitApp:
 
         # ==================== ANALYTICS DASHBOARD ====================
         elif nav_option == "📈 Analytics Dashboard":
-            st.title("📈 Domain-Specific Analytics Dashboard")
+            self._display_analytics_dashboard()
+        # ==================== ANALYTICS DASHBOARD ====================
+        # elif nav_option == "📈 Analytics Dashboard":
+        #     st.title("📈 Domain-Specific Analytics Dashboard")
             
-            claims = self.db_handler.get_all_claims()
-            if not claims:
-                st.info("No data available for analytics")
-                return
+        #     claims = self.db_handler.get_all_claims()
+        #     if not claims:
+        #         st.info("No data available for analytics")
+        #         return
             
-            df_data = []
-            for claim in claims:
-                df_data.append({
-                    'Claim ID': claim['claim_id'],
-                    'Patient': claim['patient_name'],
-                    'Diagnosis': claim.get('diagnosis', 'Unknown'),
-                    'Amount': claim.get('total_claim_amount', 0),
-                    'Fraud Score': claim.get('fraud_score', 0),
-                    'Medical Score': claim.get('medical_appropriateness_score', 0),
-                    'Status': claim.get('status', 'Unknown')
-                })
+        #     df_data = []
+        #     for claim in claims:
+        #         df_data.append({
+        #             'Claim ID': claim['claim_id'],
+        #             'Patient': claim['patient_name'],
+        #             'Diagnosis': claim.get('diagnosis', 'Unknown'),
+        #             'Amount': claim.get('total_claim_amount', 0),
+        #             'Fraud Score': claim.get('fraud_score', 0),
+        #             'Medical Score': claim.get('medical_appropriateness_score', 0),
+        #             'Status': claim.get('status', 'Unknown')
+        #         })
             
-            df = pd.DataFrame(df_data)
+        #     df = pd.DataFrame(df_data)
             
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                total_claims = len(df)
-                st.metric("Total Claims", total_claims)
-            with col2:
-                total_amount = df['Amount'].sum()
-                st.metric("Total Claim Value", f"₹{total_amount:,.0f}")
-            with col3:
-                avg_fraud_score = df['Fraud Score'].mean()
-                st.metric("Avg Fraud Risk", f"{avg_fraud_score:.1%}")
-            with col4:
-                avg_medical_score = df['Medical Score'].mean()
-                st.metric("Avg Medical Score", f"{avg_medical_score:.1%}")
+        #     col1, col2, col3, col4 = st.columns(4)
+        #     with col1:
+        #         total_claims = len(df)
+        #         st.metric("Total Claims", total_claims)
+        #     with col2:
+        #         total_amount = df['Amount'].sum()
+        #         st.metric("Total Claim Value", f"₹{total_amount:,.0f}")
+        #     with col3:
+        #         avg_fraud_score = df['Fraud Score'].mean()
+        #         st.metric("Avg Fraud Risk", f"{avg_fraud_score:.1%}")
+        #     with col4:
+        #         avg_medical_score = df['Medical Score'].mean()
+        #         st.metric("Avg Medical Score", f"{avg_medical_score:.1%}")
             
-            col1, col2 = st.columns(2)
+        #     col1, col2 = st.columns(2)
             
-            with col1:
-                st.subheader("Fraud Risk Distribution")
-                fig = px.histogram(df, x='Fraud Score', nbins=20,
-                                     title="Distribution of Fraud Risk Scores")
-                st.plotly_chart(fig, use_container_width=True)
+        #     with col1:
+        #         st.subheader("Fraud Risk Distribution")
+        #         fig = px.histogram(df, x='Fraud Score', nbins=20,
+        #                              title="Distribution of Fraud Risk Scores")
+        #         st.plotly_chart(fig, use_container_width=True)
             
-            with col2:
-                st.subheader("Medical vs Fraud Risk")
-                fig = px.scatter(df, x='Medical Score', y='Fraud Score',
-                                   color='Status', size='Amount',
-                                   title="Medical Appropriateness vs Fraud Risk")
-                st.plotly_chart(fig, use_container_width=True)
+        #     with col2:
+        #         st.subheader("Medical vs Fraud Risk")
+        #         fig = px.scatter(df, x='Medical Score', y='Fraud Score',
+        #                            color='Status', size='Amount',
+        #                            title="Medical Appropriateness vs Fraud Risk")
+        #         st.plotly_chart(fig, use_container_width=True)
             
-            st.subheader("📋 Top Diagnoses by Claim Count")
-            diagnosis_counts = df['Diagnosis'].value_counts().head(10)
-            fig = px.bar(x=diagnosis_counts.values, y=diagnosis_counts.index,
-                           orientation='h', title="Most Common Diagnoses")
-            st.plotly_chart(fig, use_container_width=True)
+        #     st.subheader("📋 Top Diagnoses by Claim Count")
+        #     diagnosis_counts = df['Diagnosis'].value_counts().head(10)
+        #     fig = px.bar(x=diagnosis_counts.values, y=diagnosis_counts.index,
+        #                    orientation='h', title="Most Common Diagnoses")
+        #     st.plotly_chart(fig, use_container_width=True)
 
         # ==================== COMPREHENSIVE REPORTS ====================
         elif nav_option == "📋 Comprehensive Reports":
@@ -1151,6 +1454,50 @@ class EnhancedStreamlitApp:
             else:
                 st.info("No recent activity.")
 
+            # ... (Existing code inside 'System Overview' -> 'Recent Activity' block) ...
+            # if claims:
+            #     recent_claims = sorted(...)
+            #     for claim in recent_claims:
+            #         st.write(...)
+            # else:
+            #     st.info("No recent activity.")  # updated on 17-12-25 , for adding an retraining button
+
+            # ---  Pasting The NEW BLOCK HERE  ---
+            st.markdown("---")
+            st.subheader("🔄 Model Maintenance & Retraining")
+            
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+                st.info("Trigger this pipeline when sufficient verified fraud cases have been collected to update the AI's decision boundaries.")
+                
+                if st.button("🚀 Retrain AI Model Now", type="primary"):
+                    # Dynamic import to avoid circular issues
+                    try:
+                        from scripts.model_trainer import train_enhanced_model
+                        from scripts.data_collector import collect_training_data
+                        
+                        # Show a cool status sequence
+                        with st.status("Running MLOps Retraining Pipeline...", expanded=True) as status:
+                            st.write("📥 collecting training data from database...")
+                            # 1. Collect Data (Real + Synthetic if needed)
+                            collect_training_data()
+                            time.sleep(1)
+                            
+                            st.write("📊 Re-calibrating XGBoost weights...")
+                            # 2. Train Model
+                            trainer = train_enhanced_model()
+                            time.sleep(1)
+                            
+                            status.update(label="✅ Retraining Complete!", state="complete", expanded=False)
+                            st.success("Model successfully updated and saved to 'models/enhanced_xgb_fraud_model.pkl'")
+                            
+                            # Optional: Show a metric to make it look advanced
+                            st.metric("New Model Status", "Active", "Updated Just Now")
+                            
+                    except Exception as e:
+                        st.error(f"Retraining Failed: {e}")
+                        
         # --- Footer ---
         st.markdown("---")
         st.markdown(

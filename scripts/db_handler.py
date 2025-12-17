@@ -175,7 +175,11 @@ class DatabaseHandler:
             # Final Decision
             "approved_amount": "REAL",
             "co_pay_amount": "REAL",
-            "patient_responsibility": "REAL"
+            "patient_responsibility": "REAL",
+            "rejection_reason": "TEXT",
+            "reviewed_by": "TEXT",
+            "reviewed_at": "TEXT",
+            "fraud_reason": "TEXT"
         }
         
         for column_name, column_type in columns_to_add.items():

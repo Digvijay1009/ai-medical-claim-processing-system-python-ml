@@ -1,3 +1,5 @@
+# While installing and running this system problems of llm can occur or others , that cannot be configured.
+# If LLm is not working then run and see this script to see the problem and also how it works.
 import json
 import logging
 import time

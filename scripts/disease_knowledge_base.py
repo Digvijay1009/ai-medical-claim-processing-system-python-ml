@@ -604,7 +604,7 @@ class DiseaseKnowledgeBase:
             'cva': 'stroke',
             'brain stroke': 'stroke',
             'migraine': 'migraine',
-            'headache': 'migrange',
+            'headache': 'migraine',
 
             # 🩸 Endocrine
             'diabetes': 'diabetes',
