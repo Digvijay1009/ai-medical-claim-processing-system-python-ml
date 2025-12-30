@@ -271,11 +271,7 @@ source kk/bin/activate # Mac/Linux
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Add claim PDFs
-# Place files inside:
-data/raw_claims/<claim_id>/
-
-# 5. Optional: Run Streamlit
+# 4. Run Streamlit
 streamlit run app/streamlit_app.py
 ```
 
