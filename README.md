@@ -300,7 +300,7 @@ streamlit run app/streamlit_app.py
 
 # <a id="author--contact"></a> **Author & Contact**
 
-**Digvijay Rengade**
+# **Digvijay Rengade**
 📧 [digvijayrengade9673@gmail.com]
 🔗 LinkedIn: [https://www.linkedin.com/in/digvijayrengade99]
 ---
